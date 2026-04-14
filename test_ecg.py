@@ -1,102 +1,130 @@
-import wfdb
-import neurokit2 as nk
 import numpy as np
-from sklearn.model_selection import train_test_split
 import torch
-
-# Load data
-record_path = "data/mitdb/mit-bih-arrhythmia-database-1.0.0/100"
-record = wfdb.rdrecord(record_path)
-annotation = wfdb.rdann(record_path, "atr")
-
-signal = record.p_signal[:, 0]
-fs = record.fs
-
-# Clean ECG
-cleaned = nk.ecg_clean(signal, sampling_rate=fs)
-
-# Annotation data
-ann_samples = np.array(annotation.sample)
-ann_symbols = np.array(annotation.symbol)
-
-# Window extraction
-window_size = 300
-half_window = window_size // 2
-
-beats = []
-labels = []
-
-for i in range(len(ann_samples)):
-    center = ann_samples[i]
-    start = center - half_window
-    end = center + half_window
-
-    if start < 0 or end > len(cleaned):
-        continue
-
-    beat = cleaned[start:end]
-    label = ann_symbols[i]
-
-    beats.append(beat)
-    labels.append(label)
-
-beats = np.array(beats)
-labels = np.array(labels)
-
-print("Beats shape:", beats.shape)
-print("Labels shape:", labels.shape)
-print("First 20 labels:", labels[:20])
-
-# Map labels to broader classes
-label_map = {
-    'N': 0, 'L': 0, 'R': 0, 'e': 0, 'j': 0,
-    'A': 1, 'a': 1, 'J': 1, 'S': 1,
-    'V': 2, 'E': 2,
-    'F': 3,
-    'Q': 4
-}
-
-filtered_beats = []
-filtered_labels = []
-
-for i in range(len(labels)):
-    if labels[i] in label_map:
-        filtered_beats.append(beats[i])
-        filtered_labels.append(label_map[labels[i]])
-
-filtered_beats = np.array(filtered_beats)
-filtered_labels = np.array(filtered_labels)
-
-print("Before rare-class removal:")
-print("Filtered shape:", filtered_beats.shape)
-print("Class distribution:", np.bincount(filtered_labels))
-
-# Remove classes with fewer than 2 samples
-unique_classes, counts = np.unique(filtered_labels, return_counts=True)
-valid_classes = unique_classes[counts >= 2]
-
-mask = np.isin(filtered_labels, valid_classes)
-filtered_beats = filtered_beats[mask]
-filtered_labels = filtered_labels[mask]
-
-print("After rare-class removal:")
-print("Filtered shape:", filtered_beats.shape)
-print("Class distribution:", np.bincount(filtered_labels))
-
-# Train-test split
-X_train, X_test, y_train, y_test = train_test_split(
-    filtered_beats,
-    filtered_labels,
-    test_size=0.2,
-    random_state=42,
-    stratify=filtered_labels
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    accuracy_score,
+    f1_score,
+    roc_auc_score
 )
 
-# Convert to tensors
-X_train = torch.tensor(X_train, dtype=torch.float32).unsqueeze(1)
-X_test = torch.tensor(X_test, dtype=torch.float32).unsqueeze(1)
-y_train = torch.tensor(y_train, dtype=torch.long)
-y_test = torch.tensor(y_test, dtype=torch.long)
+from models import CNNLSTMRealECG
 
-print("Train shape:", X_train.shape)
-print("Test shape:", X_test.shape)
+TEST_FILE = "test_real.npz"
+MODEL_FILE = "cnn_lstm_real.pt"
+BATCH_SIZE = 32
+
+NUM_CLASSES = 8
+CLASS_NAMES = [
+    "Atrial",
+    "Conduction",
+    "Hypertrophy",
+    "Normal",
+    "Other",
+    "Paced",
+    "Pre-excitation",
+    "Ventricular"
+]
+
+
+class ECGDataset(Dataset):
+    def __init__(self, npz_file):
+        data = np.load(npz_file)
+        self.X = torch.tensor(data["X"], dtype=torch.float32)
+        self.y = torch.tensor(data["y"], dtype=torch.long)
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+
+def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
+    dataset = ECGDataset(TEST_FILE)
+    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+    print("Test dataset size:", len(dataset))
+    print("Example X shape:", dataset[0][0].shape)
+    print("Unique labels present in this test split:", torch.unique(dataset.y).tolist())
+    print("Model will use NUM_CLASSES =", NUM_CLASSES)
+
+    model = CNNLSTMRealECG(
+        in_channels=dataset.X.shape[1],
+        num_classes=NUM_CLASSES,
+        lstm_hidden=128,
+        lstm_layers=1
+    ).to(device)
+
+    model.load_state_dict(torch.load(MODEL_FILE, map_location=device))
+    model.eval()
+
+    all_preds = []
+    all_true = []
+    all_probs = []
+
+    with torch.no_grad():
+        for X_batch, y_batch in loader:
+            X_batch = X_batch.to(device)
+            y_batch = y_batch.to(device)
+
+            outputs = model(X_batch)
+            probs = F.softmax(outputs, dim=1)
+            preds = torch.argmax(outputs, dim=1)
+
+            all_preds.extend(preds.cpu().numpy())
+            all_true.extend(y_batch.cpu().numpy())
+            all_probs.extend(probs.cpu().numpy())
+
+    all_preds = np.array(all_preds)
+    all_true = np.array(all_true)
+    all_probs = np.array(all_probs)
+
+    acc = accuracy_score(all_true, all_preds)
+    f1_per_class = f1_score(all_true, all_preds, average=None, labels=np.arange(NUM_CLASSES), zero_division=0)
+    f1_macro = f1_score(all_true, all_preds, average="macro", labels=np.arange(NUM_CLASSES), zero_division=0)
+    f1_weighted = f1_score(all_true, all_preds, average="weighted", labels=np.arange(NUM_CLASSES), zero_division=0)
+
+    cm = confusion_matrix(all_true, all_preds, labels=np.arange(NUM_CLASSES))
+
+    try:
+        auc_roc = roc_auc_score(all_true, all_probs, multi_class="ovr", labels=np.arange(NUM_CLASSES))
+    except ValueError:
+        auc_roc = None
+
+    print("\n--- Test Results ---")
+    print(f"Accuracy: {acc:.4f}")
+    print(f"F1 macro: {f1_macro:.4f}")
+    print(f"F1 weighted: {f1_weighted:.4f}")
+
+    print("\nF1 score per class:")
+    for i, score in enumerate(f1_per_class):
+        print(f"{CLASS_NAMES[i]}: {score:.4f}")
+
+    if auc_roc is not None:
+        print(f"\nAUC-ROC (OvR): {auc_roc:.4f}")
+    else:
+        print("\nAUC-ROC: Could not compute")
+
+    print("\nConfusion Matrix:")
+    print(cm)
+
+    print("\nClassification Report:")
+    print(
+        classification_report(
+            all_true,
+            all_preds,
+            labels=np.arange(NUM_CLASSES),
+            target_names=CLASS_NAMES,
+            zero_division=0
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()
