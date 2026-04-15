@@ -10,14 +10,18 @@ from sklearn.metrics import (
     roc_auc_score
 )
 
-from models import CNNLSTMRealECG
+from models import CNNLSTMSubtypeECG
 
-TEST_FILE = "test_real.npz"
-MODEL_FILE = "cnn_lstm_real.pt"
+TEST_FILE = "test_abnormal.npz"
+MODEL_FILE = "cnn_lstm_subtype.pt"
 BATCH_SIZE = 32
 
-NUM_CLASSES = 2
-CLASS_NAMES = ["Normal", "Abnormal"]
+NUM_CLASSES = 3
+CLASS_NAMES = [
+    "Hypertrophy",
+    "Electrical",
+    "Other"
+]
 
 
 class ECGDataset(Dataset):
@@ -44,7 +48,7 @@ def main():
     print("Example X shape:", dataset[0][0].shape)
     print("Unique labels present in this test split:", torch.unique(dataset.y).tolist())
 
-    model = CNNLSTMRealECG(
+    model = CNNLSTMSubtypeECG(
         in_channels=dataset.X.shape[1],
         num_classes=NUM_CLASSES,
         lstm_hidden=128,
@@ -81,17 +85,13 @@ def main():
     f1_weighted = f1_score(all_true, all_preds, average="weighted", labels=np.arange(NUM_CLASSES), zero_division=0)
 
     cm = confusion_matrix(all_true, all_preds, labels=np.arange(NUM_CLASSES))
-    tn, fp, fn, tp = cm.ravel()
-
-    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
 
     try:
-        auc_roc = roc_auc_score(all_true, all_probs[:, 1])
+        auc_roc = roc_auc_score(all_true, all_probs, multi_class="ovr", labels=np.arange(NUM_CLASSES))
     except ValueError:
         auc_roc = None
 
-    print("\n--- Test Results ---")
+    print("\n--- Subtype Test Results ---")
     print(f"Accuracy: {acc:.4f}")
     print(f"F1 macro: {f1_macro:.4f}")
     print(f"F1 weighted: {f1_weighted:.4f}")
@@ -101,12 +101,9 @@ def main():
         print(f"{CLASS_NAMES[i]}: {score:.4f}")
 
     if auc_roc is not None:
-        print(f"\nAUC-ROC: {auc_roc:.4f}")
+        print(f"\nAUC-ROC (OvR): {auc_roc:.4f}")
     else:
         print("\nAUC-ROC: Could not compute")
-
-    print(f"Sensitivity (Recall for Abnormal): {sensitivity:.4f}")
-    print(f"Specificity (Recall for Normal): {specificity:.4f}")
 
     print("\nConfusion Matrix:")
     print(cm)

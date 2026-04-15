@@ -4,14 +4,20 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.utils.class_weight import compute_class_weight
 
-from models import CNNLSTMRealECG
+from models import CNNLSTMSubtypeECG
 
-TRAIN_FILE = "train_real.npz"
-MODEL_OUT = "cnn_lstm_real.pt"
+TRAIN_FILE = "train_abnormal.npz"
+MODEL_OUT = "cnn_lstm_subtype.pt"
 
 BATCH_SIZE = 32
 EPOCHS = 10
 LEARNING_RATE = 1e-3
+
+CLASS_NAMES = [
+    "Hypertrophy",
+    "Electrical",
+    "Other"
+]
 
 
 class ECGDataset(Dataset):
@@ -63,26 +69,25 @@ def main():
     print("Example y:", dataset[0][1].item())
 
     y_np = dataset.y.numpy()
-    classes = np.unique(y_np)
-    num_classes = 2
+    num_classes = 3
 
-    print("Unique classes:", classes)
+    unique, counts = np.unique(y_np, return_counts=True)
+    print("Subtype training label counts:")
+    for u, c in zip(unique, counts):
+        print(f"{CLASS_NAMES[u]}: {c}")
 
-    model = CNNLSTMRealECG(
+    model = CNNLSTMSubtypeECG(
         in_channels=dataset.X.shape[1],
         num_classes=num_classes,
         lstm_hidden=128,
         lstm_layers=1
     ).to(device)
 
-    if len(classes) > 1:
-        weights = compute_class_weight(class_weight="balanced", classes=classes, y=y_np)
-        class_weights = torch.tensor(weights, dtype=torch.float32).to(device)
-        print("Class weights:", class_weights)
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-    else:
-        criterion = nn.CrossEntropyLoss()
+    weights = compute_class_weight(class_weight="balanced", classes=np.arange(num_classes), y=y_np)
+    class_weights = torch.tensor(weights, dtype=torch.float32).to(device)
+    print("Class weights:", class_weights)
 
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     for epoch in range(EPOCHS):
